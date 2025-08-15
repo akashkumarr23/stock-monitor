@@ -1,0 +1,90 @@
+name: Stock Monitor (Market Hours Only)
+
+on:
+  schedule:
+    # Run every minute during extended hours to account for time zone
+    # This will run more frequently but the Python script will check IST time
+    - cron: '* 3-11 * * 1-5'  # Covers 9:20 AM - 3:55 PM IST window in UTC
+  workflow_dispatch: # Allows manual trigger
+  push:
+    branches: [ main, master ]
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests beautifulsoup4 lxml pytz
+    
+    - name: Check if within market hours (IST)
+      id: time_check
+      run: |
+        python -c "
+        from datetime import datetime
+        import pytz
+        
+        # Get current time in IST
+        ist = pytz.timezone('Asia/Kolkata')
+        now_ist = datetime.now(ist)
+        
+        # Check if it's a weekday
+        if now_ist.weekday() >= 5:  # Saturday=5, Sunday=6
+            print('Outside market days (Weekend)')
+            print('should_run=false')
+            exit(0)
+        
+        # Check if within market hours (9:20 AM - 3:55 PM IST)
+        market_start = now_ist.replace(hour=9, minute=20, second=0, microsecond=0)
+        market_end = now_ist.replace(hour=15, minute=55, second=59, microsecond=999999)
+        
+        if market_start <= now_ist <= market_end:
+            print(f'✅ Within market hours: {now_ist.strftime(\"%Y-%m-%d %H:%M:%S IST\")}')
+            print('should_run=true')
+        else:
+            print(f'⏰ Outside market hours: {now_ist.strftime(\"%Y-%m-%d %H:%M:%S IST\")}')
+            print('Market hours: 9:20 AM - 3:55 PM IST, Monday-Friday')
+            print('should_run=false')
+        " | tee -a $GITHUB_OUTPUT
+    
+    - name: Run stock monitor
+      if: steps.time_check.outputs.should_run == 'true'
+      env:
+        BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
+        SCREENER_URLS: ${{ secrets.SCREENER_URLS }}
+      run: |
+        echo "🚀 Running stock monitor during market hours..."
+        python stock_monitor.py
+    
+    - name: Skip monitoring (outside market hours)
+      if: steps.time_check.outputs.should_run == 'false'
+      run: |
+        echo "⏭️ Skipping monitoring - outside market hours"
+    
+    - name: Upload logs (if ran)
+      if: steps.time_check.outputs.should_run == 'true' && always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: monitor-logs-${{ github.run_number }}
+        path: |
+          *.log
+        retention-days: 7
